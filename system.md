@@ -697,58 +697,6 @@ sequenceDiagram
 
 ---
 
-### 7. 개발자 모드 치트키 시퀀스
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Frontend
-    participant Backend
-    participant DB
-
-    User->>Frontend: 로그인 전 메인 화면
-    Frontend->>User: WYE 로고 표시
-    
-    User->>Frontend: 로고 클릭 (1회)
-    Frontend->>Frontend: logoClickCount = 1
-    
-    User->>Frontend: 로고 클릭 (2회)
-    Frontend->>Frontend: logoClickCount = 2
-    
-    User->>Frontend: 로고 클릭 (3회)
-    Frontend->>Frontend: logoClickCount = 3
-    
-    User->>Frontend: 로고 클릭 (4회)
-    Frontend->>Frontend: logoClickCount = 4
-    
-    User->>Frontend: 로고 클릭 (5회)
-    Frontend->>Frontend: logoClickCount = 5
-    
-    Frontend->>Frontend: 5회 달성 감지
-    Frontend->>Frontend: 임시 사용자 생성
-    Note over Frontend: id: "dev-user"<br/>name: "개발자"<br/>email: "dev@wye.com"
-    
-    Frontend->>Backend: upsertUserProfile(devUser)
-    Backend->>DB: set(user:dev-user, devUser)
-    DB->>Backend: 저장 완료
-    Backend->>Frontend: 성공 응답
-    
-    Frontend->>Frontend: currentUser = devUser
-    Frontend->>User: "개발자 모드로 로그인되었습니다" 토스트
-    Frontend->>User: 메인 화면 표시
-    
-    Note over User,Frontend: 3초 후 카운트 초기화
-    Frontend->>Frontend: logoClickCount = 0
-```
-
-**치트키 특징**:
-- 로그인 화면에서 로고 5회 연속 클릭
-- 카카오 로그인 없이 임시 계정 생성
-- 개발 및 테스트 용도
-- 3초 안에 5회 클릭해야 함
-
----
-
 ## 데이터 모델
 
 ### KV Store 키 구조
@@ -938,19 +886,6 @@ sequenceDiagram
 
 ---
 
-## 버전 히스토리
-
-- **v1.0** (2024-12)
-  - 카카오 로그인 연동
-  - 약속 생성 및 관리
-  - Haversine 기반 거리 계산
-  - 최적/공평 위치 추천
-  - 실시간 위치 공유
-  - 친구 관리
-  - 개발자 모드 치트키
-
----
-
 ## 참고 자료
 
 ### API 문서
@@ -967,5 +902,3 @@ sequenceDiagram
 - [React](https://react.dev/)
 - [TypeScript](https://www.typescriptlang.org/)
 - [Tailwind CSS](https://tailwindcss.com/)
-- [Hono](https://hono.dev/)
-- [Deno](https://deno.land/)
