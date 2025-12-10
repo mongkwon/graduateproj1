@@ -90,7 +90,7 @@
 
 ### 1. 인증 모듈 (Authentication Module)
 
-**책임**:
+**역할**:
 - 카카오 OAuth 2.0 로그인 처리
 - 개발자 모드 치트키 (로고 5회 클릭)
 - 사용자 세션 관리
@@ -122,7 +122,7 @@ interface User {
 
 ### 2. 약속 관리 모듈 (Meetup Management Module)
 
-**책임**:
+**역할**:
 - 약속 생성, 조회, 수정, 삭제
 - 참여자 관리
 - 약속 목적 설정 (카페, 식사, 관광명소, 문화시설, 지하철역)
@@ -174,7 +174,7 @@ interface Participant {
 
 ### 3. 친구 관리 모듈 (Friends Management Module)
 
-**책임**:
+**역할**:
 - 친구 추가/삭제
 - 친구 목록 조회
 - 친구를 약속 참여자로 추가
@@ -206,7 +206,7 @@ interface Friend {
 
 ### 4. 장소 추천 모듈 (Place Recommendation Module)
 
-**책임**:
+**역할**:
 - Haversine 공식으로 직선 거리 계산
 - Geometric Median 계산 (최적 위치)
 - Smallest Enclosing Circle 계산 (공평 위치)
@@ -246,7 +246,7 @@ interface RecommendedPlace {
 
 ### 5. 실시간 위치 공유 모듈 (Real-time Location Sharing Module)
 
-**책임**:
+**역할**:
 - 브라우저 Geolocation API로 현재 위치 추적
 - 실시간 위치 업데이트 (주기적)
 - 약속 시간 1시간 전부터 활성화
@@ -283,7 +283,7 @@ interface RealtimeLocation {
 
 ### 6. 지도 및 주소 검색 모듈 (Map & Address Search Module)
 
-**책임**:
+**역할**:
 - 카카오맵 표시 및 제어
 - 주소/장소명 검색
 - 좌표 ↔ 주소 변환
@@ -303,7 +303,7 @@ interface RealtimeLocation {
 
 ### 7. 알림 모듈 (Notification Module)
 
-**책임**:
+**역할**:
 - 약속 알림 설정
 - 시간 기반 알림 (30분 전, 1시간 전 등)
 - 날짜 기반 알림 (1일 전, 3일 전 등)
@@ -330,7 +330,7 @@ interface NotificationSettings {
 
 ### 8. KV Store 모듈 (Key-Value Storage Module)
 
-**책임**:
+**역할**:
 - 데이터 영속성 관리
 - 키-값 쌍 저장/조회/삭제
 - 프리픽스 기반 쿼리
