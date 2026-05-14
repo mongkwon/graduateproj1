@@ -1,857 +1,660 @@
-# WYE (Where You @) - 시퀀스 다이어그램
+# WYE (Where You @) - 데이터 플로우 다이어그램
 
-## 1. 카카오 로그인 흐름
+## 1. 로그인 및 인증 플로우
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant WYEApp
-    participant KakaoSDK
-    participant SupabaseEdge as Supabase Edge Function
-    participant KakaoAPI as Kakao API
-    participant TokenManager as kakaoTokenManager
-    participant UserProfile as userProfile
+    participant WYE as WYEApp.tsx
+    participant TokenMgr as kakaoTokenManager
+    participant EdgeFn as kakao-auth<br/>Edge Function
+    participant KakaoAPI as Kakao OAuth API
+    participant SupabaseKV as Supabase KV Store
     participant LocalStorage
 
-    User->>WYEApp: 앱 접속
-    WYEApp->>LocalStorage: getItem('kakao_token_data')
-    LocalStorage-->>WYEApp: tokenData
+    User->>WYE: 앱 접속
+    WYE->>LocalStorage: getItem('kakao_token_data')
+    LocalStorage-->>WYE: tokenData
     
     alt 유효한 토큰 존재
-        WYEApp->>TokenManager: isAccessTokenValid()
-        TokenManager->>TokenManager: 만료시간 체크 (5분 여유)
-        TokenManager-->>WYEApp: true
-        WYEApp->>TokenManager: getAccessToken()
-        TokenManager-->>WYEApp: accessToken
-        WYEApp->>SupabaseEdge: getUserInfo(accessToken)
-        SupabaseEdge->>KakaoAPI: GET /v2/user/me
-        KakaoAPI-->>SupabaseEdge: userInfo
-        SupabaseEdge-->>WYEApp: { id, nickname, profileImage }
-        WYEApp->>WYEApp: setCurrentUser(userInfo)
-        WYEApp->>WYEApp: setCurrentScreen("home")
-    else 토큰 만료
-        User->>WYEApp: 로그인 버튼 클릭
-        WYEApp->>KakaoSDK: Kakao.Auth.authorize()
-        KakaoSDK-->>User: 카카오 로그인 페이지 리디렉션
+        WYE->>TokenMgr: isAccessTokenValid()
+        TokenMgr->>TokenMgr: 만료시간 체크 (5분 여유)
+        TokenMgr-->>WYE: true
+        WYE->>TokenMgr: getAccessToken()
+        TokenMgr-->>WYE: accessToken
+        WYE->>EdgeFn: getUserInfo(accessToken)
+        EdgeFn->>KakaoAPI: GET /v2/user/me
+        KakaoAPI-->>EdgeFn: userInfo
+        EdgeFn-->>WYE: { id, nickname, profileImage }
+        WYE->>WYE: setCurrentUser(userInfo)
+        WYE->>WYE: setCurrentScreen("home")
+    else 토큰 없음/만료
+        User->>WYE: 카카오 로그인 버튼 클릭
+        WYE->>KakaoAPI: Kakao.Auth.authorize()
+        KakaoAPI-->>User: 카카오 로그인 페이지
         User->>KakaoAPI: 로그인 및 동의
-        KakaoAPI-->>WYEApp: 리디렉션 (code)
-        WYEApp->>WYEApp: URLSearchParams.get('code')
-        WYEApp->>SupabaseEdge: POST /kakao-auth { code }
-        SupabaseEdge->>KakaoAPI: POST /oauth/token
-        KakaoAPI-->>SupabaseEdge: { access_token, refresh_token, expires_in }
-        SupabaseEdge->>KakaoAPI: GET /v2/user/me
-        KakaoAPI-->>SupabaseEdge: userInfo
-        SupabaseEdge-->>WYEApp: { success, accessToken, refreshToken, userInfo }
-        WYEApp->>TokenManager: saveTokenData({ accessToken, refreshToken, expiresIn, refreshTokenExpiresIn })
-        TokenManager->>LocalStorage: setItem('kakao_token_data', JSON.stringify(tokenData))
-        WYEApp->>WYEApp: setCurrentUser(userInfo)
-        WYEApp->>WYEApp: setCurrentScreen("home")
+        KakaoAPI-->>WYE: 리디렉션 (code)
+        WYE->>EdgeFn: POST /kakao-auth { code }
+        EdgeFn->>KakaoAPI: POST /oauth/token
+        KakaoAPI-->>EdgeFn: { access_token, refresh_token, expires_in }
+        EdgeFn->>KakaoAPI: GET /v2/user/me
+        KakaoAPI-->>EdgeFn: userInfo
+        EdgeFn-->>WYE: { success, accessToken, refreshToken, userInfo }
+        WYE->>TokenMgr: saveTokenData(tokens)
+        TokenMgr->>LocalStorage: setItem('kakao_token_data')
+        WYE->>SupabaseKV: kv.set(`user_profile_${userId}`, profile)
+        WYE->>WYE: setCurrentUser(userInfo)
+        WYE->>WYE: setCurrentScreen("home")
     end
 ```
 
-## 2. 약속 생성 흐름
+## 2. 약속 생성 및 장소 추천 플로우
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant WYEApp
-    participant FriendsManager as friendsManager
+    participant WYE as WYEApp.tsx
+    participant FriendsMgr as friendsManager
+    participant Calc as fairDistanceCalculator
+    participant KakaoPlaces as Kakao Places API
+    participant KakaoGeocoder as Kakao Geocoder API
     participant MeetupStorage as meetupStorage
-    participant NotificationHelper as notificationHelpers
-    participant LocalStorage
     participant SupabaseKV as Supabase KV Store
 
-    User->>WYEApp: "새 약속 만들기" 클릭
-    WYEApp->>WYEApp: setCurrentScreen("create")
-    WYEApp->>WYEApp: 폼 초기화
+    User->>WYE: "새 약속 만들기" 클릭
+    WYE->>WYE: setCurrentScreen("create")
     
-    User->>WYEApp: 약속 정보 입력
-    Note over User,WYEApp: title, date, time, purpose
+    User->>WYE: 기본 정보 입력<br/>(제목, 날짜, 시간, 목적)
     
-    User->>WYEApp: "친구 추가" 클릭
-    WYEApp->>FriendsManager: loadFriends(currentUser.id)
-    FriendsManager->>SupabaseKV: kv.get(`friends_${userId}`)
-    SupabaseKV-->>FriendsManager: friendsList
-    FriendsManager-->>WYEApp: Friend[]
-    WYEApp->>WYEApp: setShowFriendsDialog(true)
+    User->>WYE: "친구 추가" 클릭
+    WYE->>FriendsMgr: loadFriends(currentUser.id)
+    FriendsMgr->>SupabaseKV: kv.get(`friends_${userId}`)
+    SupabaseKV-->>FriendsMgr: friendsList
+    FriendsMgr-->>WYE: Friend[]
+    WYE->>User: 친구 선택 다이얼로그
     
-    User->>WYEApp: 친구 선택
-    WYEApp->>WYEApp: participants.push({ id, name, location, transport })
+    User->>WYE: 친구 선택
+    WYE->>WYE: participants.push(friend)
     
-    User->>WYEApp: 출발지 검색 (KakaoAddressSearch)
-    WYEApp->>KakaoMap: 카카오맵 API 호출
-    KakaoMap-->>WYEApp: 주소 결과
-    User->>WYEApp: 주소 선택
-    WYEApp->>WYEApp: participant.location = address
+    User->>WYE: 출발지 검색 (KakaoAddressSearch)
+    WYE->>KakaoPlaces: keywordSearch(address)
+    KakaoPlaces-->>WYE: 검색 결과
+    User->>WYE: 주소 선택
+    WYE->>WYE: participant.location = address
     
-    User->>WYEApp: 교통수단 선택
-    WYEApp->>WYEApp: participant.transport = "car" | "transit"
+    User->>WYE: 교통수단 선택 (자동차/대중교통)
+    WYE->>WYE: participant.transport = transport
     
-    User->>WYEApp: "약속 만들기" 버튼 클릭
-    WYEApp->>WYEApp: 입력 검증
+    User->>WYE: "장소 추천 방식 선택"<br/>(공평거리/최적거리)
+    WYE->>WYE: setTimeOptimizationType(type)
     
-    WYEApp->>WYEApp: 새 Meetup 객체 생성
-    Note over WYEApp: { id, title, date, time,<br/>purpose, participants,<br/>status: "planning",<br/>createdBy, createdAt }
-    
-    WYEApp->>MeetupStorage: saveMeetup(meetup)
-    MeetupStorage->>SupabaseKV: kv.set(`meetup_${meetupId}`, meetup)
-    SupabaseKV-->>MeetupStorage: success
-    MeetupStorage->>SupabaseKV: kv.get(`user_meetups_${userId}`)
-    SupabaseKV-->>MeetupStorage: meetupIds[]
-    MeetupStorage->>MeetupStorage: meetupIds.push(newMeetupId)
-    MeetupStorage->>SupabaseKV: kv.set(`user_meetups_${userId}`, meetupIds)
+    User->>WYE: "장소 추천" 클릭
     
     loop 각 참여자
-        WYEApp->>MeetupStorage: addMeetupToUser(participantId, meetupId)
-        MeetupStorage->>SupabaseKV: kv.get(`user_meetups_${participantId}`)
-        SupabaseKV-->>MeetupStorage: meetupIds[]
-        MeetupStorage->>SupabaseKV: kv.set(`user_meetups_${participantId}`, updatedIds)
+        WYE->>KakaoGeocoder: addressSearch(participant.location)
+        KakaoGeocoder-->>WYE: { lat, lng }
+        WYE->>WYE: participantLocations.push({ lat, lng })
     end
     
-    WYEApp->>NotificationHelper: createMeetupNotification(meetup, participants)
-    loop 각 참여자
-        NotificationHelper->>SupabaseKV: kv.get(`notifications_${participantId}`)
-        SupabaseKV-->>NotificationHelper: notifications[]
-        NotificationHelper->>NotificationHelper: notifications.unshift(newNotification)
-        NotificationHelper->>SupabaseKV: kv.set(`notifications_${participantId}`, notifications)
+    alt 공평거리 추천
+        WYE->>Calc: calculateGeometricMedian(participantLocations)
+        Note over Calc: Weiszfeld 알고리즘<br/>거리 합 최소화
+        Calc-->>WYE: { lat, lng } (중심점)
+    else 최적거리 추천
+        WYE->>Calc: calculateGeometricMedian(participantLocations)
+        Note over Calc: 동일한 중심점 계산<br/>정렬 방식만 다름
+        Calc-->>WYE: { lat, lng } (중심점)
     end
     
-    WYEApp->>WYEApp: setMeetups([...meetups, newMeetup])
-    WYEApp->>WYEApp: setCurrentScreen("home")
-    WYEApp->>User: "약속이 생성되었습니다!" 토스트
-```
-
-## 3. 공평 거리 장소 추천 흐름
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant WYEApp
-    participant FairCalculator as fairDistanceCalculator
-    participant KakaoPlaces as Kakao Places API
-    participant FairDistancePlaces
-
-    User->>WYEApp: 약속 상세 > "장소 추천" 클릭
-    WYEApp->>WYEApp: setShowRecommendations(true)
+    WYE->>KakaoPlaces: keywordSearch(purpose, centerPoint, radius: 3000m)
+    KakaoPlaces-->>WYE: 주변 장소 목록
     
-    WYEApp->>FairCalculator: calculateGeometricMedian(participants)
-    Note over FairCalculator: Weiszfeld 알고리즘 사용
-    
-    loop 최대 100회 반복 (수렴까지)
-        FairCalculator->>FairCalculator: 현재 추정점에서<br/>각 참여자까지 거리 계산
-        FairCalculator->>FairCalculator: calculateDistance(lat1, lng1, lat2, lng2)
-        Note over FairCalculator: Haversine 공식:<br/>R = 6371km,<br/>dLat, dLng 계산,<br/>a = sin²(dLat/2) + cos(lat1)×cos(lat2)×sin²(dLng/2),<br/>c = 2×atan2(√a, √(1-a)),<br/>distance = R × c
-        FairCalculator->>FairCalculator: 가중 평균으로 새 추정점 계산
-        FairCalculator->>FairCalculator: 이동 거리 < 0.001km면 종료
-    end
-    
-    FairCalculator-->>WYEApp: { lat, lng } (중심점)
-    
-    WYEApp->>KakaoPlaces: 키워드 검색 (중심점, purpose)
-    Note over WYEApp,KakaoPlaces: Places API:<br/>new kakao.maps.services.Places()<br/>.keywordSearch(purpose, callback, options)
-    
-    KakaoPlaces-->>WYEApp: searchResults[]
-    
-    WYEApp->>FairCalculator: calculateFairDistancePlaces(searchResults, participants)
+    WYE->>Calc: calculateFairDistancePlaces(places, participants)
     
     loop 각 장소
         loop 각 참여자
-            FairCalculator->>FairCalculator: distance = calculateDistance(<br/>place.lat, place.lng,<br/>participant.lat, participant.lng)
-            FairCalculator->>FairCalculator: distances.push(distance)
+            Calc->>Calc: distance = calculateDistance(<br/>place.lat, place.lng,<br/>participant.lat, participant.lng)
+            Note over Calc: Haversine 공식
+            Calc->>Calc: distances.push(distance)
         end
-        
-        FairCalculator->>FairCalculator: avgDistance = mean(distances)
-        FairCalculator->>FairCalculator: variance = √(Σ(d - avg)² / n)
-        Note over FairCalculator: 거리 편차(표준편차) 계산
-        
-        FairCalculator->>FairCalculator: place.distanceVariance = variance
-        FairCalculator->>FairCalculator: place.avgDistance = avgDistance
-        FairCalculator->>FairCalculator: place.maxDistance = max(distances)
-        FairCalculator->>FairCalculator: place.minDistance = min(distances)
+        Calc->>Calc: totalDistance = sum(distances)
+        Calc->>Calc: avgDistance = totalDistance / count
+        Calc->>Calc: maxDistance = max(distances)
+        Calc->>Calc: distanceVariance = stdDev(distances)
     end
     
-    FairCalculator->>FairCalculator: places.sort((a, b) => <br/>a.distanceVariance - b.distanceVariance)
-    Note over FairCalculator: 편차가 작을수록 공평
+    alt 공평거리 정렬
+        Calc->>Calc: sort by distanceVariance (ascending)
+        Note over Calc: 편차가 작을수록 공평
+    else 최적거리 정렬
+        Calc->>Calc: sort by totalDistance (ascending)
+        Note over Calc: 총 거리가 작을수록 최적
+    end
     
-    FairCalculator-->>WYEApp: sortedPlaces[]
+    Calc-->>WYE: 정렬된 장소 목록
+    WYE->>User: 추천 장소 표시
     
-    WYEApp->>FairDistancePlaces: 렌더링 (places, onSelectLocation)
-    FairDistancePlaces->>User: 공평한 장소 목록 표시
+    User->>WYE: 장소 선택
+    WYE->>WYE: selectedLocation = place
     
-    User->>FairDistancePlaces: 장소 선택
-    FairDistancePlaces->>WYEApp: onSelectLocation(selectedPlace)
-    WYEApp->>WYEApp: setSelectedLocation(place)
+    User->>WYE: 장소 확정
+    WYE->>WYE: meetup.selectedLocation = selectedLocation
+    WYE->>WYE: meetup.status = "confirmed"
     
-    User->>WYEApp: "장소 확정" 버튼
-    WYEApp->>WYEApp: currentMeetup.selectedLocation = selectedLocation
-    WYEApp->>WYEApp: currentMeetup.status = "confirmed"
-    WYEApp->>MeetupStorage: updateMeetup(meetup)
-    MeetupStorage->>SupabaseKV: kv.set(`meetup_${id}`, meetup)
-    WYEApp->>User: "장소가 확정되었습니다!" 토스트
+    User->>WYE: (선택) 준비물 추가
+    WYE->>WYE: meetup.items.push(item)
+    
+    User->>WYE: "약속 만들기" 버튼
+    
+    WYE->>MeetupStorage: saveMeetup(meetup)
+    MeetupStorage->>SupabaseKV: kv.set(`meetup_${meetupId}`, meetup)
+    MeetupStorage->>SupabaseKV: kv.get(`user_meetups_${userId}`)
+    MeetupStorage->>SupabaseKV: kv.set(`user_meetups_${userId}`, [...ids, meetupId])
+    
+    loop 각 참여자
+        MeetupStorage->>SupabaseKV: kv.get(`user_meetups_${participantId}`)
+        MeetupStorage->>SupabaseKV: kv.set(`user_meetups_${participantId}`, [...ids, meetupId])
+        MeetupStorage->>SupabaseKV: kv.get(`notifications_${participantId}`)
+        MeetupStorage->>SupabaseKV: kv.set(`notifications_${participantId}`, [newNotif, ...notifs])
+    end
+    
+    MeetupStorage-->>WYE: success
+    WYE->>User: "약속이 생성되었습니다!" 토스트
+    WYE->>WYE: setCurrentScreen("home")
 ```
 
-## 4. 경로 표시 및 이동시간 계산 흐름
+## 3. 경로 표시 플로우
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant WYEApp
+    participant WYE as WYEApp.tsx
     participant KakaoMap
     participant KakaoMobility as Kakao Mobility API
     participant ODsayAPI as ODsay API
-    participant FairCalculator as fairDistanceCalculator
+    participant Calc as fairDistanceCalculator
 
-    User->>WYEApp: 확정된 약속 상세 열기
-    WYEApp->>WYEApp: selectedLocation 확인
+    User->>WYE: 확정된 약속 상세 보기
+    WYE->>WYE: 약속 장소 확인
     
-    WYEApp->>FairCalculator: calculateParticipantDetails(participants, selectedLocation)
+    WYE->>Calc: calculateParticipantDetails(participants, selectedLocation)
     
     loop 각 참여자
-        alt 실시간 위치 있음
-            FairCalculator->>FairCalculator: startLat = realtimeLocation.latitude
-            FairCalculator->>FairCalculator: startLng = realtimeLocation.longitude
-        else 저장된 출발지만 있음
-            Note over FairCalculator: 주소는 좌표 변환 필요<br/>(경로 표시 시)
-        end
-        
-        FairCalculator->>FairCalculator: distance = calculateDistance(<br/>startLat, startLng,<br/>selectedLocation.lat, selectedLocation.lng)
+        Calc->>Calc: distance = calculateDistance(<br/>participant.lat, participant.lng,<br/>selectedLocation.lat, selectedLocation.lng)
         
         alt transport === "car"
-            FairCalculator->>FairCalculator: avgSpeed = 40 km/h
+            Calc->>Calc: avgSpeed = 40 km/h
         else transport === "transit"
-            FairCalculator->>FairCalculator: avgSpeed = 25 km/h
+            Calc->>Calc: avgSpeed = 25 km/h
         end
         
-        FairCalculator->>FairCalculator: time = (distance / avgSpeed) × 60
-        Note over FairCalculator: 시간(분) = (거리 / 속도) × 60
-        
-        FairCalculator->>FairCalculator: details.push({ name, distance, time, transport })
+        Calc->>Calc: time = (distance / avgSpeed) × 60
+        Calc->>Calc: details.push({ name, distance, time, transport })
     end
     
-    FairCalculator-->>WYEApp: participantDetails[]
+    Calc-->>WYE: participantDetails[]
+    WYE->>User: 참여자별 거리/시간 표시
     
-    WYEApp->>KakaoMap: 지도 렌더링 (participantLocations, meetingPlace)
+    WYE->>KakaoMap: 지도 렌더링 (participantLocations, meetingPlace)
     
-    loop 각 참여자 (실시간 위치 있는 경우)
+    loop 각 참여자 (실시간 위치 or 저장된 주소)
         KakaoMap->>KakaoMap: drawRoute(participant)
         
         alt transport === "car"
-            KakaoMap->>KakaoMobility: GET /v1/directions
-            Note over KakaoMap,KakaoMobility: Headers: { Authorization: "KakaoAK {REST_API_KEY}" }<br/>Query: origin={lng},{lat}&destination={lng},{lat}&priority=RECOMMEND
+            KakaoMap->>KakaoMobility: GET /v1/directions<br/>origin={lng},{lat}&destination={lng},{lat}
+            Note over KakaoMobility: Authorization: KakaoAK {REST_API_KEY}
             
-            KakaoMobility-->>KakaoMap: { routes: [{ sections: [{ roads: [{ vertexes }] }] }] }
+            KakaoMobility-->>KakaoMap: { routes[0].sections[0].roads[].vertexes }
             
-            KakaoMap->>KakaoMap: path = vertexes를 LatLng로 변환
-            Note over KakaoMap: vertexes는 [lng, lat, lng, lat, ...]<br/>형태이므로 2개씩 묶어서 변환
-            
-            KakaoMap->>KakaoMap: polyline = new kakao.maps.Polyline({<br/>path, strokeWeight: 4,<br/>strokeColor: "#3b82f6",<br/>strokeOpacity: 0.8 })
-            
+            KakaoMap->>KakaoMap: vertexes를 LatLng로 변환<br/>(2개씩 묶어서)
+            KakaoMap->>KakaoMap: polyline = new kakao.maps.Polyline({<br/>path, strokeColor: "#3b82f6",<br/>strokeWeight: 4 })
             KakaoMap->>KakaoMap: polyline.setMap(map)
-            KakaoMap->>KakaoMap: polylinesRef.current.push(polyline)
             
         else transport === "transit"
-            KakaoMap->>ODsayAPI: GET /v1/api/searchPubTransPathT
-            Note over KakaoMap,ODsayAPI: Query: SX={lng}&SY={lat}&EX={lng}&EY={lat}&apiKey={API_KEY}
+            KakaoMap->>ODsayAPI: GET /v1/api/searchPubTransPathT<br/>SX={lng}&SY={lat}&EX={lng}&EY={lat}
             
             alt API 성공
-                ODsayAPI-->>KakaoMap: { result: { path: [{ subPath }] } }
+                ODsayAPI-->>KakaoMap: { result.path[0].subPath[] }
                 
                 loop 각 subPath
-                    alt subPath.trafficType === 1 (지하철)
+                    alt trafficType === 1 (지하철)
                         KakaoMap->>KakaoMap: passStopList.lane에서 좌표 추출
-                    else subPath.trafficType === 2 (버스)
+                    else trafficType === 2 (버스)
                         KakaoMap->>KakaoMap: passStopList.lane에서 좌표 추출
-                    else subPath.trafficType === 3 (도보)
+                    else trafficType === 3 (도보)
                         KakaoMap->>KakaoMap: 시작점-끝점 직선
                     end
-                    
-                    KakaoMap->>KakaoMap: path.push(new kakao.maps.LatLng(y, x))
+                    KakaoMap->>KakaoMap: path.push(LatLng)
                 end
                 
-                KakaoMap->>KakaoMap: polyline = new kakao.maps.Polyline({<br/>path, strokeWeight: 4,<br/>strokeColor: "#ef4444",<br/>strokeOpacity: 0.8 })
+                KakaoMap->>KakaoMap: polyline = new kakao.maps.Polyline({<br/>path, strokeColor: "#ef4444",<br/>strokeWeight: 4 })
                 
-            else API 실패 (인증 에러)
-                Note over KakaoMap,ODsayAPI: [ApiKeyAuthFailed] 발생 시
-                KakaoMap->>KakaoMap: 직선 경로로 fallback
-                KakaoMap->>KakaoMap: path = [start, end]
-                KakaoMap->>KakaoMap: polyline 생성 (strokeStyle: "dashed")
+            else API 실패
+                KakaoMap->>KakaoMap: 직선 경로로 fallback<br/>strokeStyle: "dashed"
             end
             
             KakaoMap->>KakaoMap: polyline.setMap(map)
-            KakaoMap->>KakaoMap: polylinesRef.current.push(polyline)
         end
         
-        KakaoMap->>KakaoMap: 출발지 커스텀 오버레이 생성
-        Note over KakaoMap: 참여자 이름 박스 + 화살표 포인터<br/>색상: car = 파란색, transit = 빨간색
-        
+        KakaoMap->>KakaoMap: 출발지 커스텀 오버레이 생성<br/>(이름 박스 + 화살표 포인터)
+        Note over KakaoMap: car: 파란색, transit: 빨간색
         KakaoMap->>KakaoMap: overlay.setMap(map)
-        KakaoMap->>KakaoMap: participantMarkersRef.current.push(overlay)
     end
     
-    KakaoMap->>KakaoMap: 약속장소 마커 생성
-    Note over KakaoMap: "📍 약속 장소" 빨간색 오버레이
+    KakaoMap->>KakaoMap: 약속장소 마커 생성<br/>"📍 약속 장소" (빨간색)
+    KakaoMap->>KakaoMap: fitMapToBounds() (모든 마커 포함)
     
     KakaoMap->>User: 경로 및 마커 표시된 지도
 ```
 
-## 5. 실시간 위치 공유 흐름
+## 4. 실시간 위치 공유 플로우
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant WYEApp
+    participant WYE as WYEApp.tsx
     participant Browser as Navigator.geolocation
-    participant SupabaseKV
-    participant RealtimeLocationMap
+    participant SupabaseKV as Supabase KV Store
+    participant RealtimeMap as RealtimeLocationMap
     participant KakaoGeocoder as Kakao Geocoder API
 
-    User->>WYEApp: 약속 상세 페이지 진입
-    WYEApp->>WYEApp: isWithinOneHourOfMeetup() 체크
-    Note over WYEApp: 약속 시간 1시간 이내인지 확인
+    User->>WYE: 약속 상세 페이지 진입
+    WYE->>WYE: isWithinOneHourOfMeetup() 체크
+    Note over WYE: 약속 시간 1시간 전~1시간 후 체크
     
-    alt 1시간 이내
-        WYEApp->>User: "내 위치 공유" 버튼 활성화
+    alt 시간 범위 내
+        WYE->>User: "내 위치 공유" 버튼 활성화
         
-        User->>WYEApp: "공유 시작" 클릭
-        WYEApp->>WYEApp: toggleLocationSharing()
+        User->>WYE: "공유 시작" 클릭
+        WYE->>Browser: navigator.geolocation.getCurrentPosition()
         
-        WYEApp->>Browser: navigator.geolocation.getCurrentPosition()
-        Browser-->>WYEApp: { coords: { latitude, longitude } }
+        Browser-->>WYE: { coords: { latitude, longitude } }
         
-        WYEApp->>WYEApp: realtimeLocation = {<br/>userId: currentUser.id,<br/>latitude,<br/>longitude,<br/>timestamp: Date.now() }
+        WYE->>WYE: realtimeLocation = {<br/>userId, latitude, longitude,<br/>timestamp: Date.now() }
         
-        WYEApp->>SupabaseKV: kv.set(`realtime_location_${meetupId}_${userId}`, location)
-        SupabaseKV-->>WYEApp: success
+        WYE->>SupabaseKV: kv.set(`realtime_location_${meetupId}_${userId}`, location)
+        SupabaseKV-->>WYE: success
         
-        WYEApp->>WYEApp: setIsLocationSharingEnabled(true)
-        WYEApp->>WYEApp: setActiveMeetupId(meetupId)
+        WYE->>WYE: setIsLocationSharingEnabled(true)
+        WYE->>WYE: setActiveMeetupId(meetupId)
         
-        WYEApp->>Browser: setInterval(updateLocation, 10000)
-        Note over WYEApp,Browser: 10초마다 위치 업데이트
-        
-        WYEApp->>WYEApp: setLocationUpdateInterval(intervalId)
+        WYE->>Browser: setInterval(updateLocation, 10000)
+        Note over WYE,Browser: 10초마다 위치 업데이트
         
         loop 10초마다
-            WYEApp->>Browser: navigator.geolocation.getCurrentPosition()
-            Browser-->>WYEApp: { coords: { latitude, longitude } }
+            Browser->>WYE: getCurrentPosition()
             
-            WYEApp->>WYEApp: 위치 변화 확인 (50m 이상 이동 시에만 업데이트)
+            WYE->>WYE: 이전 위치와 비교<br/>(50m 이상 이동 시만 업데이트)
             
             alt 위치 변화 있음
-                WYEApp->>SupabaseKV: kv.set(`realtime_location_${meetupId}_${userId}`, newLocation)
-                WYEApp->>KakaoGeocoder: coord2Address(lng, lat)
-                KakaoGeocoder-->>WYEApp: address
-                WYEApp->>WYEApp: setLocationAddresses({ [userId]: address })
+                WYE->>SupabaseKV: kv.set(`realtime_location_${meetupId}_${userId}`, newLocation)
+                WYE->>KakaoGeocoder: coord2Address(lng, lat)
+                KakaoGeocoder-->>WYE: address
+                WYE->>WYE: setLocationAddresses({ [userId]: address })
             end
         end
         
-    else 1시간 이후
-        WYEApp->>User: "위치 공유는 약속 1시간 전부터 가능합니다" 메시지
+    else 시간 범위 외
+        WYE->>User: "위치 공유는 약속 1시간 전부터 가능합니다"
     end
     
-    Note over WYEApp: 다른 참여자들의 위치 조회
+    Note over WYE: 다른 참여자 위치 조회
     
-    WYEApp->>SupabaseKV: kv.getByPrefix(`realtime_location_${meetupId}_`)
-    SupabaseKV-->>WYEApp: allLocations[]
+    WYE->>SupabaseKV: kv.getByPrefix(`realtime_location_${meetupId}_`)
+    SupabaseKV-->>WYE: allLocations[]
     
-    WYEApp->>WYEApp: setRealtimeLocations(allLocations)
+    WYE->>WYE: setRealtimeLocations(allLocations)
     
     loop 각 위치
-        WYEApp->>WYEApp: isLocationActive(timestamp)
-        Note over WYEApp: 현재 시간 - timestamp < 5분이면 활성
+        WYE->>WYE: isLocationActive(timestamp)
+        Note over WYE: 현재 시간 - timestamp < 5분
         
-        WYEApp->>KakaoGeocoder: coord2Address(lng, lat)
-        KakaoGeocoder-->>WYEApp: address
-        WYEApp->>WYEApp: locationAddresses[userId] = address
+        WYE->>KakaoGeocoder: coord2Address(lng, lat)
+        KakaoGeocoder-->>WYE: address
+        WYE->>WYE: locationAddresses[userId] = address
     end
     
-    WYEApp->>RealtimeLocationMap: 렌더링 (locations, participants, meetingPlace)
+    WYE->>RealtimeMap: 렌더링 (locations, participants, meetingPlace)
     
-    RealtimeLocationMap->>RealtimeLocationMap: 지도 초기화
-    Note over RealtimeLocationMap: 중심: meetingPlace 또는 참여자 위치 평균
+    RealtimeMap->>RealtimeMap: 지도 초기화<br/>중심: meetingPlace
     
     loop 각 참여자
-        RealtimeLocationMap->>RealtimeLocationMap: 커스텀 오버레이 생성
-        Note over RealtimeLocationMap: 활성: 초록색 테두리<br/>비활성: 회색 테두리
-        
-        RealtimeLocationMap->>RealtimeLocationMap: overlay.setMap(map)
+        RealtimeMap->>RealtimeMap: 커스텀 오버레이 생성
+        Note over RealtimeMap: 활성: 초록색 테두리<br/>비활성: 회색 테두리
+        RealtimeMap->>RealtimeMap: overlay.setMap(map)
     end
     
-    RealtimeLocationMap->>RealtimeLocationMap: meetingPlace 마커 추가
-    RealtimeLocationMap->>RealtimeLocationMap: fitMapToBounds() - 모든 마커 포함
+    RealtimeMap->>RealtimeMap: meetingPlace 마커 추가
+    RealtimeMap->>RealtimeMap: fitMapToBounds() (모든 마커)
     
-    RealtimeLocationMap->>User: 실시간 위치 지도 표시
+    RealtimeMap->>User: 실시간 위치 지도
     
-    User->>WYEApp: "공유 중단" 클릭
-    WYEApp->>WYEApp: clearInterval(locationUpdateInterval)
-    WYEApp->>WYEApp: setIsLocationSharingEnabled(false)
-    WYEApp->>WYEApp: setActiveMeetupId(null)
-    WYEApp->>User: 위치 공유 중단됨
+    User->>WYE: "공유 중단" 클릭
+    WYE->>WYE: clearInterval(locationUpdateInterval)
+    WYE->>WYE: setIsLocationSharingEnabled(false)
+    WYE->>User: 위치 공유 중단됨
 ```
 
-## 6. 길찾기 흐름
+## 5. 길찾기 플로우
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant WYEApp
+    participant WYE as WYEApp.tsx
     participant KakaoGeocoder as Kakao Geocoder API
-    participant KakaoMap as Kakao Map App
     participant Browser
+    participant KakaoMap as Kakao Map App
 
-    User->>WYEApp: 약속 상세 > 참여자 옆 "길찾기" 버튼 클릭
+    User->>WYE: 약속 상세 > 참여자 옆<br/>"길찾기" 버튼 클릭
     
-    WYEApp->>WYEApp: geocodeAddress(participant.location)
+    WYE->>WYE: geocodeAddress(participant.location)
     
     alt 실시간 위치 공유 중
-        WYEApp->>WYEApp: startCoords = {<br/>lat: realtimeLocation.latitude,<br/>lng: realtimeLocation.longitude }
+        WYE->>WYE: startCoords = {<br/>lat: realtimeLocation.latitude,<br/>lng: realtimeLocation.longitude }
         
     else 저장된 주소만 있음
-        WYEApp->>KakaoGeocoder: kakao.maps.load()
-        KakaoGeocoder-->>WYEApp: SDK 로드 완료
+        WYE->>KakaoGeocoder: kakao.maps.load()
+        KakaoGeocoder-->>WYE: SDK 로드 완료
         
-        WYEApp->>KakaoGeocoder: new Geocoder()
-        WYEApp->>KakaoGeocoder: addressSearch(address, callback)
+        WYE->>KakaoGeocoder: new Geocoder()
+        WYE->>KakaoGeocoder: addressSearch(address)
         
         alt 주소 검색 성공
-            KakaoGeocoder-->>WYEApp: { result: [{ x, y }] }
-            WYEApp->>WYEApp: startCoords = { lat: parseFloat(y), lng: parseFloat(x) }
+            KakaoGeocoder-->>WYE: { result[0]: { x, y } }
+            WYE->>WYE: startCoords = { lat: y, lng: x }
             
-        else 주소 검색 실패
-            Note over WYEApp,KakaoGeocoder: Status: ZERO_RESULT
-            
-            WYEApp->>KakaoGeocoder: new Places()
-            WYEApp->>KakaoGeocoder: keywordSearch(address, callback)
-            Note over WYEApp,KakaoGeocoder: Fallback: 키워드로 장소 검색
+        else 주소 검색 실패 (ZERO_RESULT)
+            WYE->>KakaoGeocoder: new Places()
+            WYE->>KakaoGeocoder: keywordSearch(address)
+            Note over WYE,KakaoGeocoder: Fallback: 키워드로 장소 검색
             
             alt 키워드 검색 성공
-                KakaoGeocoder-->>WYEApp: { result: [{ x, y }] }
-                WYEApp->>WYEApp: startCoords = { lat: parseFloat(y), lng: parseFloat(x) }
+                KakaoGeocoder-->>WYE: { result[0]: { x, y } }
+                WYE->>WYE: startCoords = { lat: y, lng: x }
                 
             else 키워드 검색 실패
-                WYEApp->>User: alert("출발지 주소를 찾을 수 없습니다.")
-                WYEApp->>WYEApp: return
+                WYE->>User: alert("출발지 주소를 찾을 수 없습니다.")
+                WYE->>WYE: return
             end
         end
     end
     
-    WYEApp->>WYEApp: getNavigationUrl(startCoords, endLat, endLng, endName, transport)
+    WYE->>WYE: getNavigationUrl(<br/>startCoords, endLat, endLng,<br/>endName, transport)
     
     alt transport === "car"
-        WYEApp->>WYEApp: by = "car"
+        WYE->>WYE: by = "car"
     else transport === "transit"
-        WYEApp->>WYEApp: by = "publictransit"
+        WYE->>WYE: by = "publictransit"
     end
     
-    WYEApp->>WYEApp: navUrl = `http://m.map.kakao.com/scheme/route?<br/>sp=${startCoords.lat},${startCoords.lng}<br/>&ep=${endLat},${endLng}<br/>&by=${by}`
+    WYE->>WYE: navUrl = `http://m.map.kakao.com/scheme/route?<br/>sp=${lat},${lng}&ep=${lat},${lng}&by=${by}`
     
-    WYEApp->>Browser: window.open(navUrl, '_blank')
+    WYE->>Browser: window.open(navUrl, '_blank')
     
-    alt 모바일 환경 + 카카오맵 앱 설치됨
+    alt 모바일 + 카카오맵 앱 설치
         Browser->>KakaoMap: 앱 실행
-        KakaoMap->>User: 길찾기 화면 (출발지→도착지)
+        KakaoMap->>User: 길찾기 화면 (출발→도착)
         
-    else 웹 환경 또는 앱 미설치
-        Browser->>User: 카카오맵 웹 페이지 오픈
-        Note over Browser,User: 새 탭에서 길찾기 표시
+    else 웹 환경 or 앱 미설치
+        Browser->>User: 카카오맵 웹 페이지
+        Note over Browser,User: 새 탭에서 길찾기
     end
 ```
 
-## 7. 약속 수정 흐름
+## 6. 친구 및 크루 관리 플로우
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant WYEApp
-    participant MeetupStorage
-    participant SupabaseKV
-    participant NotificationHelper
+    participant Friends as FriendsListPage
+    participant FriendsMgr as friendsManager
+    participant CrewMgr as crewStorage
+    participant SupabaseKV as Supabase KV Store
+    participant EdgeFn as kakao-friends<br/>Edge Function
+    participant KakaoAPI as Kakao API
 
-    User->>WYEApp: 약속 상세 > "수정" 버튼
-    WYEApp->>WYEApp: setIsEditingMeetup(true)
-    WYEApp->>WYEApp: 기존 약속 정보 폼에 채우기
-    Note over WYEApp: meetupName = currentMeetup.title<br/>meetupDate = currentMeetup.date<br/>meetupTime = currentMeetup.time<br/>meetupPurpose = currentMeetup.purpose<br/>participants = currentMeetup.participants<br/>selectedLocation = currentMeetup.selectedLocation
+    User->>Friends: 친구 목록 페이지 이동
     
-    WYEApp->>WYEApp: setOriginalMeetupPurpose(currentMeetup.purpose)
-    
-    User->>WYEApp: 정보 수정 (참여자 추가/삭제, 시간 변경 등)
-    
-    alt 약속 장소 유형(purpose) 변경됨
-        User->>WYEApp: purpose 변경
-        WYEApp->>WYEApp: setSelectedLocation(null)
-        Note over WYEApp: 장소 초기화 - 재추천 필요
+    par 친구 로드
+        Friends->>FriendsMgr: loadFriends(userId)
+        FriendsMgr->>SupabaseKV: kv.get(`friends_${userId}`)
+        SupabaseKV-->>FriendsMgr: friendsList
+        FriendsMgr-->>Friends: Friend[]
+    and 크루 로드
+        Friends->>CrewMgr: getCrewsByUser(userId)
+        CrewMgr->>SupabaseKV: kv.getByPrefix(`crew_`)
+        SupabaseKV-->>CrewMgr: allCrews
+        CrewMgr->>CrewMgr: filter(crew.members.includes(userId))
+        CrewMgr-->>Friends: Crew[]
     end
     
-    User->>WYEApp: "수정 완료" 버튼
+    Friends->>User: 친구 및 크루 목록 표시
     
-    WYEApp->>WYEApp: updatedMeetup = {<br/>...currentMeetup,<br/>title: meetupName,<br/>date: meetupDate,<br/>time: meetupTime,<br/>purpose: meetupPurpose,<br/>participants: participants,<br/>selectedLocation: selectedLocation,<br/>updatedAt: new Date().toISOString() }
+    alt 수동 친구 추가
+        User->>Friends: "친구 추가" (이름, 전화번호)
+        Friends->>FriendsMgr: addFriend(userId, name, phone)
+        FriendsMgr->>SupabaseKV: kv.get(`friends_${userId}`)
+        FriendsMgr->>SupabaseKV: kv.set(`friends_${userId}`, [...friends, newFriend])
+        SupabaseKV-->>FriendsMgr: success
+        FriendsMgr-->>Friends: Friend
+        Friends->>User: 목록 갱신
+    end
     
-    WYEApp->>MeetupStorage: updateMeetup(updatedMeetup)
-    MeetupStorage->>SupabaseKV: kv.set(`meetup_${id}`, updatedMeetup)
-    SupabaseKV-->>MeetupStorage: success
-    MeetupStorage-->>WYEApp: success
-    
-    alt 새로운 참여자 추가됨
-        loop 각 신규 참여자
-            WYEApp->>MeetupStorage: addMeetupToUser(participantId, meetupId)
-            MeetupStorage->>SupabaseKV: kv.get(`user_meetups_${participantId}`)
-            SupabaseKV-->>MeetupStorage: meetupIds[]
-            MeetupStorage->>SupabaseKV: kv.set(`user_meetups_${participantId}`, [...meetupIds, meetupId])
-            
-            WYEApp->>NotificationHelper: createNotification(participantId, "약속 초대")
-            NotificationHelper->>SupabaseKV: kv.get(`notifications_${participantId}`)
-            NotificationHelper->>SupabaseKV: kv.set(`notifications_${participantId}`, updatedNotifications)
+    alt 카카오 친구 가져오기
+        User->>Friends: "카카오 친구 가져오기"
+        Friends->>EdgeFn: POST /kakao-friends { accessToken }
+        EdgeFn->>KakaoAPI: GET /v1/api/talk/friends
+        KakaoAPI-->>EdgeFn: { elements: [{ uuid, profile_nickname }] }
+        EdgeFn-->>Friends: kakaoFriends[]
+        
+        loop 각 카카오 친구
+            Friends->>FriendsMgr: addFriend(userId, kakaoFriend)
+            FriendsMgr->>SupabaseKV: kv.set(`friends_${userId}`, updatedFriends)
         end
+        
+        Friends->>User: 목록 갱신 + 토스트
     end
     
-    alt 참여자 제거됨
-        loop 각 제거된 참여자
-            WYEApp->>MeetupStorage: removeMeetupFromUser(participantId, meetupId)
-            MeetupStorage->>SupabaseKV: kv.get(`user_meetups_${participantId}`)
-            SupabaseKV-->>MeetupStorage: meetupIds[]
-            MeetupStorage->>MeetupStorage: meetupIds.filter(id !== meetupId)
-            MeetupStorage->>SupabaseKV: kv.set(`user_meetups_${participantId}`, filteredIds)
-        end
+    alt 크루 생성
+        User->>Friends: "크루 생성" (이름, 설명)
+        Friends->>CrewMgr: createCrew(userId, name, description)
+        CrewMgr->>SupabaseKV: kv.set(`crew_${crewId}`, {<br/>id, name, description,<br/>members: [userId], createdBy: userId })
+        SupabaseKV-->>CrewMgr: success
+        CrewMgr-->>Friends: Crew
+        Friends->>User: 크루 생성 완료
     end
     
-    WYEApp->>WYEApp: setMeetups(meetups.map(m => m.id === updatedMeetup.id ? updatedMeetup : m))
-    WYEApp->>WYEApp: setCurrentMeetup(updatedMeetup)
-    WYEApp->>WYEApp: setIsEditingMeetup(false)
-    WYEApp->>User: "약속이 수정되었습니다!" 토스트
+    alt 크루에 멤버 추가
+        User->>Friends: 크루 선택 > 멤버 추가
+        Friends->>Friends: 친구 목록에서 선택
+        Friends->>CrewMgr: addMemberToCrew(crewId, friendId)
+        CrewMgr->>SupabaseKV: kv.get(`crew_${crewId}`)
+        CrewMgr->>SupabaseKV: kv.set(`crew_${crewId}`, {<br/>...crew, members: [...members, friendId] })
+        CrewMgr-->>Friends: success
+        Friends->>User: 멤버 추가 완료
+    end
 ```
 
-## 8. 데이터 구조 및 저장소 관계
+## 7. 알림 플로우
 
 ```mermaid
-classDiagram
-    class WYEApp {
-        -User currentUser
-        -Meetup[] meetups
-        -Participant[] participants
-        -Location selectedLocation
-        -RealtimeLocation[] realtimeLocations
-        -Notification[] notifications
-        -string currentScreen
-        -boolean isLocationSharingEnabled
-        +handleLogin()
-        +createMeetup()
-        +updateMeetup()
-        +deleteMeetup()
-        +toggleLocationSharing()
-        +geocodeAddress(address)
-        +getNavigationUrl()
-    }
+sequenceDiagram
+    actor User
+    participant WYE as WYEApp.tsx
+    participant NotifHelper as notificationHelpers
+    participant SupabaseKV as Supabase KV Store
+    participant Browser as Browser Notification API
+    participant LocalStorage
+
+    Note over WYE: 약속 관련 이벤트 발생
     
-    class User {
-        +string id
-        +string name
-        +string email
-        +string profileImage
-    }
+    alt 약속 생성
+        WYE->>NotifHelper: createNotification(type: "meetup_created")
+        NotifHelper->>NotifHelper: newNotification = {<br/>id, type, message,<br/>timestamp, read: false }
+    else 약속 수정
+        WYE->>NotifHelper: createNotification(type: "meetup_updated")
+    else 약속 임박 (1시간 전)
+        WYE->>WYE: checkMeetupTime() (주기적 체크)
+        WYE->>NotifHelper: createNotification(type: "meetup_soon")
+    else 지각 경고 (10분 전, 1km 이상 떨어짐)
+        WYE->>WYE: checkLateWarning()
+        WYE->>NotifHelper: createNotification(type: "late_warning")
+    end
     
-    class Meetup {
-        +string id
-        +string title
-        +string date
-        +string time
-        +string purpose
-        +Participant[] participants
-        +Location selectedLocation
-        +string status
-        +string createdBy
-        +string[] items
-        +string createdAt
-        +string updatedAt
-    }
+    NotifHelper->>SupabaseKV: kv.get(`notifications_${userId}`)
+    SupabaseKV-->>NotifHelper: notifications[]
+    NotifHelper->>SupabaseKV: kv.set(`notifications_${userId}`, [newNotif, ...notifications])
     
-    class Participant {
-        +string id
-        +string name
-        +string location
-        +string transport
-    }
+    NotifHelper->>WYE: setNotifications([newNotif, ...notifications])
     
-    class Location {
-        +string name
-        +string address
-        +number lat
-        +number lng
-        +number rating
-        +string distance
-        +string type
-        +number distanceVariance
-        +number avgDistance
-    }
+    alt 토스트 알림 표시
+        WYE->>User: toast.success/warning/error(message)
+        Note over WYE,User: Sonner 토스트<br/>3-10초 자동 사라짐
+    end
     
-    class RealtimeLocation {
-        +string userId
-        +number latitude
-        +number longitude
-        +number timestamp
-    }
+    alt 브라우저 알림 권한 있음
+        WYE->>Browser: Notification.permission === "granted"?
+        
+        alt 권한 있음
+            WYE->>Browser: new Notification(title, {<br/>body: message,<br/>icon: wyeLogo,<br/>tag: notificationId })
+            Browser->>User: 브라우저 네이티브 알림
+            
+            User->>Browser: 알림 클릭
+            Browser->>WYE: window.focus()
+            Browser->>Browser: notification.close()
+            
+        else 권한 없음
+            Note over WYE,Browser: 토스트만 표시
+        end
+    end
     
-    class Notification {
-        +string id
-        +string type
-        +string message
-        +string timestamp
-        +boolean read
-        +string meetupId
-        +string meetupTitle
-    }
+    NotifHelper->>LocalStorage: setItem(`shown_notifications`, [...shownIds, notifId])
+    Note over NotifHelper,LocalStorage: 중복 알림 방지
     
-    class kakaoTokenManager {
-        +saveTokenData(data)
-        +getTokenData()
-        +isAccessTokenValid()
-        +getAccessToken()
-        +refreshAccessToken()
-        +clearTokenData()
-    }
+    User->>WYE: 알림 아이콘 클릭
+    WYE->>SupabaseKV: kv.get(`notifications_${userId}`)
+    SupabaseKV-->>WYE: notifications[]
+    WYE->>User: 알림 목록 표시
     
-    class meetupStorage {
-        +saveMeetup(meetup)
-        +getMeetup(id)
-        +updateMeetup(meetup)
-        +deleteMeetup(id)
-        +getUserMeetups(userId)
-        +addMeetupToUser(userId, meetupId)
-    }
+    User->>WYE: 알림 읽음 처리
+    WYE->>SupabaseKV: kv.get(`notifications_${userId}`)
+    WYE->>WYE: notifications.map(n => n.id === id ? {...n, read: true} : n)
+    WYE->>SupabaseKV: kv.set(`notifications_${userId}`, updatedNotifications)
+    WYE->>User: 알림 상태 업데이트
+```
+
+## 8. 외부 사용자 공유 플로우
+
+```mermaid
+sequenceDiagram
+    actor Host as 약속 주최자
+    actor External as 외부 사용자
+    participant WYE as WYEApp.tsx
+    participant SupabaseKV as Supabase KV Store
+    participant Browser
+
+    Host->>WYE: 약속 상세 > "공유" 버튼
+    WYE->>WYE: shareToken = generateUUID()
+    WYE->>SupabaseKV: kv.set(`share_${shareToken}`, {<br/>meetupId, expiresAt })
+    SupabaseKV-->>WYE: success
     
-    class fairDistanceCalculator {
-        +calculateDistance(lat1, lng1, lat2, lng2)
-        +calculateGeometricMedian(participants)
-        +calculateFairDistancePlaces(places, participants)
-        +calculateParticipantDetails(participants, selectedLocation)
-    }
+    WYE->>WYE: shareUrl = `${baseUrl}?share=${shareToken}`
+    WYE->>Browser: navigator.clipboard.writeText(shareUrl)
+    WYE->>Host: "링크가 복사되었습니다!" 토스트
     
-    class friendsManager {
-        +loadFriends(userId)
-        +saveFriends(userId, friends)
-        +addFriend(userId, friend)
-        +removeFriend(userId, friendId)
-    }
+    Host->>External: 링크 전달 (카카오톡, 문자 등)
     
-    class userProfile {
-        +saveProfile(userId, profile)
-        +getProfile(userId)
-        +updateProfile(userId, updates)
-    }
+    External->>WYE: 공유 링크 접속
+    WYE->>WYE: URLSearchParams.get('share')
+    WYE->>SupabaseKV: kv.get(`share_${shareToken}`)
+    SupabaseKV-->>WYE: { meetupId, expiresAt }
     
-    class KakaoMap {
-        -any mapInstance
-        -any[] polylinesRef
-        -any[] participantMarkersRef
-        +drawRoute(participant)
-        +addMeetingPlaceMarker()
-        +fitMapToBounds()
-    }
+    alt 링크 유효
+        WYE->>SupabaseKV: kv.get(`meetup_${meetupId}`)
+        SupabaseKV-->>WYE: meetupData
+        WYE->>External: 약속 정보 표시
+        
+        External->>WYE: 이름 입력
+        External->>WYE: 출발지 입력 (KakaoAddressSearch)
+        External->>WYE: 교통수단 선택 (자동차/대중교통)
+        
+        External->>WYE: "참여하기" 버튼
+        
+        WYE->>WYE: externalParticipant = {<br/>id: `external_${UUID}`,<br/>name, location, transport }
+        
+        WYE->>SupabaseKV: kv.get(`meetup_${meetupId}`)
+        WYE->>WYE: meetup.participants.push(externalParticipant)
+        WYE->>SupabaseKV: kv.set(`meetup_${meetupId}`, updatedMeetup)
+        
+        WYE->>External: "약속에 참여했습니다!" 토스트
+        WYE->>External: 약속 상세 페이지 표시
+        
+    else 링크 만료/유효하지 않음
+        WYE->>External: "유효하지 않은 공유 링크입니다." 에러
+    end
+```
+
+## 9. 데이터 저장소 구조
+
+```mermaid
+graph LR
+    subgraph "LocalStorage"
+        TokenData[kakao_token_data<br/>{ accessToken, refreshToken,<br/>expiresIn, tokenSavedAt }]
+        ShownNotifs[shown_notifications<br/>표시된 알림 ID 배열]
+        LateChecked[lateCheckedMeetups<br/>지각 체크 완료 약속 Set]
+        UnreadMeetups[unreadMeetups<br/>미확인 약속 Set]
+    end
     
-    class RealtimeLocationMap {
-        -any mapInstance
-        -any[] overlaysRef
-        +addMeetingPlaceMarker()
-        +fitMapToBounds()
-    }
+    subgraph "Supabase KV Store"
+        UserProfile[user_profile_{userId}<br/>프로필 정보]
+        UserMeetups[user_meetups_{userId}<br/>약속 ID 배열]
+        Friends[friends_{userId}<br/>친구 목록]
+        Crews[crew_{crewId}<br/>크루 정보]
+        Meetup[meetup_{meetupId}<br/>약속 상세]
+        Notifications[notifications_{userId}<br/>알림 목록]
+        RealtimeLocation[realtime_location_{meetupId}_{userId}<br/>실시간 위치]
+        ShareToken[share_{shareToken}<br/>공유 링크 정보]
+    end
     
-    class SupabaseKV {
-        +get(key)
-        +set(key, value)
-        +getByPrefix(prefix)
-        +mget(keys)
-        +mset(entries)
-        +del(key)
-    }
+    WYEApp -->|읽기/쓰기| TokenData
+    WYEApp -->|읽기/쓰기| ShownNotifs
+    WYEApp -->|읽기/쓰기| LateChecked
+    WYEApp -->|읽기/쓰기| UnreadMeetups
     
-    WYEApp --> User
-    WYEApp --> Meetup
-    WYEApp --> RealtimeLocation
-    WYEApp --> Notification
-    Meetup --> Participant
-    Meetup --> Location
+    WYEApp -->|API 호출| UserProfile
+    WYEApp -->|API 호출| UserMeetups
+    WYEApp -->|API 호출| Friends
+    WYEApp -->|API 호출| Crews
+    WYEApp -->|API 호출| Meetup
+    WYEApp -->|API 호출| Notifications
+    WYEApp -->|API 호출| RealtimeLocation
+    WYEApp -->|API 호출| ShareToken
     
-    WYEApp ..> kakaoTokenManager : uses
-    WYEApp ..> meetupStorage : uses
-    WYEApp ..> fairDistanceCalculator : uses
-    WYEApp ..> friendsManager : uses
-    WYEApp ..> userProfile : uses
-    WYEApp --> KakaoMap : renders
-    WYEApp --> RealtimeLocationMap : renders
-    
-    kakaoTokenManager ..> SupabaseKV : stores in localStorage
-    meetupStorage ..> SupabaseKV : uses
-    friendsManager ..> SupabaseKV : uses
-    userProfile ..> SupabaseKV : uses
+    style LocalStorage fill:#fff4e6
+    style "Supabase KV Store" fill:#e1f5ff
 ```
 
-## 9. 주요 알고리즘 및 계산식
+## 10. 외부 API 연동 정리
 
-### 9.1 Haversine 거리 계산
-```
-R = 6371 (지구 반지름 km)
-dLat = (lat2 - lat1) × π / 180
-dLng = (lng2 - lng1) × π / 180
+### 10.1 Kakao OAuth API
+- **Token Request**: `POST https://kauth.kakao.com/oauth/token`
+- **User Info**: `GET https://kapi.kakao.com/v2/user/me`
+- **Friends**: `GET https://kapi.kakao.com/v1/api/talk/friends`
 
-a = sin²(dLat/2) + cos(lat1 × π/180) × cos(lat2 × π/180) × sin²(dLng/2)
-c = 2 × atan2(√a, √(1-a))
-distance = R × c
-```
+### 10.2 Kakao Maps API
+- **Places Search**: `kakao.maps.services.Places().keywordSearch()`
+- **Geocoder**: `kakao.maps.services.Geocoder().addressSearch()`
+- **Coord2Address**: `kakao.maps.services.Geocoder().coord2Address()`
 
-### 9.2 Geometric Median (Weiszfeld 알고리즘)
-```
-초기값: centerLat = 평균위도, centerLng = 평균경도
+### 10.3 Kakao Mobility API
+- **Car Navigation**: `GET https://apis-navi.kakaomobility.com/v1/directions`
+- **Headers**: `Authorization: KakaoAK {REST_API_KEY}`
 
-반복 (최대 100회):
-  totalWeight = 0
-  newLat = 0
-  newLng = 0
-  
-  각 참여자 p:
-    d = calculateDistance(centerLat, centerLng, p.lat, p.lng)
-    만약 d > 0:
-      weight = 1 / d
-      totalWeight += weight
-      newLat += p.lat × weight
-      newLng += p.lng × weight
-  
-  newLat /= totalWeight
-  newLng /= totalWeight
-  
-  이동거리 = calculateDistance(centerLat, centerLng, newLat, newLng)
-  만약 이동거리 < 0.001: 종료
-  
-  centerLat = newLat
-  centerLng = newLng
+### 10.4 ODsay API
+- **Transit Route**: `GET https://api.odsay.com/v1/api/searchPubTransPathT`
+- **Query**: `SX={lng}&SY={lat}&EX={lng}&EY={lat}&apiKey={API_KEY}`
 
-반환: { lat: centerLat, lng: centerLng }
-```
-
-### 9.3 거리 편차 계산 (공평도)
-```
-각 장소 place:
-  distances = []
-  
-  각 참여자 p:
-    d = calculateDistance(place.lat, place.lng, p.lat, p.lng)
-    distances.push(d)
-  
-  avgDistance = sum(distances) / distances.length
-  
-  variance = √(Σ(d - avgDistance)² / distances.length)
-  
-  place.distanceVariance = variance
-  place.avgDistance = avgDistance
-
-정렬: places.sort((a, b) => a.distanceVariance - b.distanceVariance)
-```
-
-### 9.4 이동 시간 추정
-```
-만약 transport === "car":
-  avgSpeed = 40 km/h
-아니면:
-  avgSpeed = 25 km/h
-
-time (분) = (distance / avgSpeed) × 60
-```
-
-## 10. 외부 API 호출 정리
-
-### 10.1 Kakao Mobility API (자동차 경로)
-```
-GET https://apis-navi.kakaomobility.com/v1/directions
-Headers:
-  Authorization: KakaoAK {REST_API_KEY}
-Query:
-  origin={startLng},{startLat}
-  destination={endLng},{endLat}
-  priority=RECOMMEND
-
-Response:
-  routes[0].sections[0].roads[].vertexes (경로 좌표 배열)
-```
-
-### 10.2 ODsay API (대중교통 경로)
-```
-GET https://api.odsay.com/v1/api/searchPubTransPathT
-Query:
-  SX={startLng}
-  SY={startLat}
-  EX={endLng}
-  EY={endLat}
-  apiKey={API_KEY} (URL encoded)
-
-Response:
-  result.path[0].subPath[] (구간별 경로 정보)
-  - trafficType: 1(지하철), 2(버스), 3(도보)
-  - passStopList.lane[] (경유 정류장 좌표)
-```
-
-### 10.3 Kakao Places API (장소 검색)
-```
-JavaScript SDK:
-  places = new kakao.maps.services.Places()
-  places.keywordSearch(keyword, callback, {
-    location: new kakao.maps.LatLng(centerLat, centerLng),
-    radius: 3000
-  })
-
-Response:
-  결과 배열 [{
-    place_name,
-    address_name,
-    x (경도),
-    y (위도),
-    phone,
-    category_name
-  }]
-```
-
-### 10.4 Kakao Geocoder API (주소→좌표)
-```
-JavaScript SDK:
-  geocoder = new kakao.maps.services.Geocoder()
-  geocoder.addressSearch(address, callback)
-
-Fallback (키워드 검색):
-  places = new kakao.maps.services.Places()
-  places.keywordSearch(address, callback)
-
-Response:
-  result[0] { x (경도), y (위도) }
-```
-
-### 10.5 Kakao Coord2Address API (좌표→주소)
-```
-JavaScript SDK:
-  geocoder = new kakao.maps.services.Geocoder()
-  geocoder.coord2Address(lng, lat, callback)
-
-Response:
-  address.address_name (지번 주소)
-  또는 road_address.address_name (도로명 주소)
-```
-
-## 11. 저장소 키 구조 (Supabase KV)
-
-```
-토큰:
-  - kakao_token_data (localStorage)
-
-사용자:
-  - user_profile_{userId}
-  - user_meetups_{userId} (약속 ID 배열)
-  - friends_{userId} (친구 목록)
-  - crews_{userId} (크루 목록)
-
-약속:
-  - meetup_{meetupId}
-  - realtime_location_{meetupId}_{userId}
-
-알림:
-  - notifications_{userId}
-
-설정:
-  - lateCheckedMeetups (Set<meetupId>) (localStorage)
-  - unreadMeetups (Set<meetupId>) (localStorage)
-```
+### 10.5 Browser APIs
+- **Geolocation**: `navigator.geolocation.getCurrentPosition()`
+- **Notification**: `new Notification(title, options)`
+- **Clipboard**: `navigator.clipboard.writeText(text)`
